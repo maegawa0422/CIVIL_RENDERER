@@ -1,0 +1,5 @@
+{
+  "name": "CIVIL RENDERER",
+  "description": "Upload a sketch or a simple 3D model for civil engineering or architecture, provide materials and prompts, and let AI render a photorealistic version of your image. This tool leverages Gemini to transform your concepts into high-quality visuals, with features for check-back and re-rendering.",
+  "requestFramePermissions": []
+}
