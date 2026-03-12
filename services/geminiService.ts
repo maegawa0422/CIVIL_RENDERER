@@ -61,25 +61,98 @@ const callGeminiApi = async (parts: any[]): Promise<string> => {
     }
 };
 
-export const renderImage = async (baseImageFile: File, materials: Omit<Material, 'id'>[], prompt: string): Promise<string> => {
+const cropImageToAspectRatio = (imageBase64: string, targetAspectRatio: number): Promise<string> => {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+            const sourceWidth = img.width;
+            const sourceHeight = img.height;
+            const sourceAspectRatio = sourceWidth / sourceHeight;
+
+            let cropWidth = sourceWidth;
+            let cropHeight = sourceHeight;
+
+            if (sourceAspectRatio > targetAspectRatio) {
+                // Image is wider than target, crop width
+                cropWidth = sourceHeight * targetAspectRatio;
+            } else if (sourceAspectRatio < targetAspectRatio) {
+                // Image is taller than target, crop height
+                cropHeight = sourceWidth / targetAspectRatio;
+            }
+
+            const cropX = (sourceWidth - cropWidth) / 2;
+            const cropY = (sourceHeight - cropHeight) / 2;
+            
+            const canvas = document.createElement('canvas');
+            canvas.width = cropWidth;
+            canvas.height = cropHeight;
+            const ctx = canvas.getContext('2d');
+
+            if (!ctx) {
+                return reject(new Error('Could not get canvas context'));
+            }
+
+            ctx.drawImage(img, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+            resolve(canvas.toDataURL('image/png'));
+        };
+        img.onerror = (err) => reject(err);
+        img.src = imageBase64;
+    });
+};
+
+const getImageAspectRatio = (imageFile: File): Promise<number> => {
+     return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+            resolve(img.width / img.height);
+        };
+        img.onerror = (err) => reject(err);
+        img.src = URL.createObjectURL(imageFile);
+    });
+};
+
+
+export const renderImage = async (baseImageFile: File, materials: Omit<Material, 'id'>[], prompt: string, isEnhancementMode: boolean): Promise<string> => {
     const baseImagePart = await fileToGenerativePart(baseImageFile);
     const materialImageParts = await Promise.all(materials.map(m => fileToGenerativePart(m.file)));
+    const targetAspectRatio = await getImageAspectRatio(baseImageFile);
 
-    let textContent = `Render the base image with photorealistic quality. `;
+    let textContent = '';
+    
+    if (isEnhancementMode) {
+        textContent = `Enhance the provided image to a photorealistic level. The image is a nearly complete architectural rendering. Focus on improving lighting, shadows, textures, and adding realistic details to make it look like a real photograph. `;
+    } else {
+        textContent = `Render the base image with photorealistic quality. `;
+    }
+
     if (materials.length > 0) {
         const materialDescriptions = materials.map(m => `[${m.name}]`).join(', ');
-        textContent += `Use the provided material images as references for different surfaces. The materials provided are: ${materialDescriptions}. Please apply these materials to the appropriate surfaces in the base image based on their names (e.g., apply the material named 'concrete' to concrete surfaces). `;
+        if (isEnhancementMode) {
+            textContent += `Use the provided material images to refine or replace existing textures where appropriate, based on their names (e.g., improve the texture of concrete surfaces using the 'concrete' material named '${materialDescriptions}'). `;
+        } else {
+            textContent += `Use the provided material images as references for different surfaces. The materials provided are: ${materialDescriptions}. Please apply these materials to the appropriate surfaces in the base image based on their names (e.g., apply the material named 'concrete' to concrete surfaces). `;
+        }
     }
     textContent += `User's detailed prompt: ${prompt}`;
-
+    
     const textPart = { text: textContent };
     
     const parts = [baseImagePart, ...materialImageParts, textPart];
-    return callGeminiApi(parts);
+    const rawResult = await callGeminiApi(parts);
+    return cropImageToAspectRatio(rawResult, targetAspectRatio);
 };
 
 export const reRenderImage = async (originalImageBase64: string, checkbackFile: File | null, prompt: string): Promise<string> => {
     const originalImagePart = base64ToGenerativePart(originalImageBase64);
+
+    // Get aspect ratio from the original (already cropped) base64 image
+    const targetAspectRatio = await new Promise<number>((resolve, reject) => {
+         const img = new Image();
+         img.onload = () => resolve(img.width / img.height);
+         img.onerror = reject;
+         img.src = originalImageBase64;
+    });
+
     const parts: any[] = [originalImagePart];
     let textContent = '';
 
@@ -95,5 +168,6 @@ export const reRenderImage = async (originalImageBase64: string, checkbackFile: 
     const textPart = { text: textContent };
     parts.push(textPart);
     
-    return callGeminiApi(parts);
+    const rawResult = await callGeminiApi(parts);
+    return cropImageToAspectRatio(rawResult, targetAspectRatio);
 };

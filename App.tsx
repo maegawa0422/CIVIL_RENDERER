@@ -117,9 +117,11 @@ interface ImageInputPanelProps {
   onRender: () => void;
   isLoading: boolean;
   onStartEdit: () => void;
+  isEnhancementMode: boolean;
+  onEnhancementModeChange: (enabled: boolean) => void;
 }
 
-const ImageInputPanel: React.FC<ImageInputPanelProps> = ({ onImageChange, imagePreview, prompt, setPrompt, materials, onMaterialsChange, onRemoveMaterial, onMaterialNameChange, onRender, isLoading, onStartEdit }) => {
+const ImageInputPanel: React.FC<ImageInputPanelProps> = ({ onImageChange, imagePreview, prompt, setPrompt, materials, onMaterialsChange, onRemoveMaterial, onMaterialNameChange, onRender, isLoading, onStartEdit, isEnhancementMode, onEnhancementModeChange }) => {
   const [isDraggingBase, setIsDraggingBase] = useState(false);
   const [isDraggingMaterial, setIsDraggingMaterial] = useState(false);
 
@@ -257,7 +259,34 @@ const ImageInputPanel: React.FC<ImageInputPanelProps> = ({ onImageChange, imageP
           <textarea id="prompt" rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="e.g., A photorealistic render of a modern bridge, daytime lighting, clear sky..." className="w-full bg-slate-900/50 border border-slate-700 rounded-lg p-3 text-slate-200 placeholder-slate-500 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200 resize-none" />
         </div>
       </div>
-      <div className="flex-shrink-0">
+        <div className="flex-shrink-0 space-y-4">
+        {/* Enhancement Mode Toggle */}
+        <div className="flex items-center justify-between bg-slate-900/50 p-3 rounded-lg">
+            <div className="flex-grow pr-4">
+                <label htmlFor="enhancement-mode" className="font-medium text-slate-200 cursor-pointer">
+                    高画質化モード (Enhance Realism)
+                </label>
+                <p className="text-xs text-slate-400">For refining already detailed images.</p>
+            </div>
+            <button
+                type="button"
+                id="enhancement-mode"
+                onClick={() => onEnhancementModeChange(!isEnhancementMode)}
+                className={`${
+                    isEnhancementMode ? 'bg-indigo-600' : 'bg-slate-700'
+                } relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-slate-800`}
+                role="switch"
+                aria-checked={isEnhancementMode}
+            >
+                <span
+                    aria-hidden="true"
+                    className={`${
+                        isEnhancementMode ? 'translate-x-5' : 'translate-x-0'
+                    } pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out`}
+                />
+            </button>
+        </div>
+
          <button onClick={onRender} disabled={!imagePreview || !prompt || isLoading} className="w-full flex justify-center items-center gap-2 bg-indigo-600 text-white font-bold py-3 px-4 rounded-lg transition-all duration-200 shadow-lg shadow-indigo-900/50 hover:bg-indigo-500 disabled:bg-slate-700 disabled:text-slate-400 disabled:cursor-not-allowed disabled:shadow-none">
           {isLoading ? <><Loader /> Rendering...</> : 'Render Photorealistic Image'}
         </button>
@@ -443,6 +472,7 @@ const DownloadPanel: React.FC<{ onDownload: (resolution: string) => void }> = ({
 type Tool = 'select' | 'pen' | 'line' | 'rectangle' | 'text';
 type Point = { x: number; y: number };
 type LineDash = 'solid' | 'dashed' | 'dotted';
+type SymbolType = 'none' | 'arrow' | 'circle';
 type Drawable = {
     id: string;
     type: Tool;
@@ -451,6 +481,11 @@ type Drawable = {
     lineWidth: number;
     lineDash: LineDash;
     text?: string;
+    closed?: boolean;
+    fillColor?: string;
+    fillOpacity?: number;
+    startSymbol?: SymbolType;
+    endSymbol?: SymbolType;
 };
 type EditingState = {
     id: string;
@@ -483,11 +518,17 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ baseImage, onSave, onCanc
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const imageRef = useRef<HTMLImageElement>(new Image());
     const textAreaRef = useRef<HTMLTextAreaElement>(null);
+    const isShiftPressedRef = useRef(false);
 
     const [tool, setTool] = useState<Tool>('pen');
     const [color, setColor] = useState('#ff3b30');
     const [lineWidth, setLineWidth] = useState(5);
     const [lineDash, setLineDash] = useState<LineDash>('solid');
+    const [fillColor, setFillColor] = useState('#4f46e5');
+    const [fillOpacity, setFillOpacity] = useState(0.3);
+    const [isClosed, setIsClosed] = useState(false);
+    const [startSymbol, setStartSymbol] = useState<SymbolType>('none');
+    const [endSymbol, setEndSymbol] = useState<SymbolType>('none');
 
     const [objects, setObjects] = useState<Drawable[]>([]);
     const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
@@ -500,6 +541,9 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ baseImage, onSave, onCanc
     const [action, setAction] = useState<Action>('none');
     const [startPoint, setStartPoint] = useState<Point>({ x: 0, y: 0 });
     const [initialObjectState, setInitialObjectState] = useState<Drawable | null>(null);
+    
+    const isShapeTool = (t: Tool) => t === 'pen' || t === 'rectangle';
+    const isLineTool = (t: Tool) => t === 'pen' || t === 'line';
 
     const updateHistory = useCallback((newObjects: Drawable[]) => {
         const newHistory = history.slice(0, historyIndex + 1);
@@ -519,11 +563,30 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ baseImage, onSave, onCanc
         for (let i = objects.length - 1; i >= 0; i--) {
             const obj = objects[i];
             const threshold = Math.max(10, obj.lineWidth / 2);
+            // Check fill area first for closed shapes
+            if (obj.closed && obj.fillOpacity && obj.fillOpacity > 0) {
+                 const ctx = getContext();
+                 if(ctx) {
+                    ctx.beginPath();
+                    if (obj.type === 'rectangle' && obj.points.length === 2) {
+                        const [start, end] = obj.points;
+                        ctx.rect(start.x, start.y, end.x - start.x, end.y - start.y);
+                    } else if (obj.type === 'pen' && obj.points.length > 1) {
+                        ctx.moveTo(obj.points[0].x, obj.points[0].y);
+                        obj.points.slice(1).forEach(p => ctx.lineTo(p.x, p.y));
+                    }
+                    ctx.closePath();
+                    if (ctx.isPointInPath(pos.x, pos.y)) return obj;
+                 }
+            }
+
             if (obj.type === 'rectangle') {
                 const [start, end] = obj.points;
                 const minX = Math.min(start.x, end.x), maxX = Math.max(start.x, end.x);
                 const minY = Math.min(start.y, end.y), maxY = Math.max(start.y, end.y);
-                if (pos.x >= minX && pos.x <= maxX && pos.y >= minY && pos.y <= maxY) return obj;
+                const onHorizontal = (pos.y > minY - threshold && pos.y < minY + threshold) || (pos.y > maxY - threshold && pos.y < maxY + threshold);
+                const onVertical = (pos.x > minX - threshold && pos.x < minX + threshold) || (pos.x > maxX - threshold && pos.x < maxX + threshold);
+                 if ((onHorizontal && pos.x > minX && pos.x < maxX) || (onVertical && pos.y > minY && pos.y < maxY)) return obj;
             } else if (obj.type === 'line' || obj.type === 'pen') {
                 for (let j = 0; j < obj.points.length - 1; j++) {
                     if (pDistanceSq(pos, obj.points[j], obj.points[j + 1]) < threshold * threshold) return obj;
@@ -533,7 +596,7 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ baseImage, onSave, onCanc
                 if (!ctx || !obj.text) continue;
                 ctx.font = `${obj.lineWidth * 4}px sans-serif`;
                 const textLines = obj.text.split('\n');
-                const textHeight = textLines.length * (obj.lineWidth * 4);
+                const textHeight = textLines.length * (obj.lineWidth * 4 * 1.2);
                 const textWidth = Math.max(...textLines.map(line => ctx.measureText(line).width));
                 if (pos.x >= obj.points[0].x && pos.x <= obj.points[0].x + textWidth &&
                     pos.y >= obj.points[0].y && pos.y <= obj.points[0].y + textHeight) return obj;
@@ -542,12 +605,38 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ baseImage, onSave, onCanc
         return null;
     };
     
-    const drawObject = useCallback((ctx: CanvasRenderingContext2D, obj: Drawable) => {
-        ctx.strokeStyle = obj.color;
-        ctx.lineWidth = obj.lineWidth;
+    const drawSymbol = (ctx: CanvasRenderingContext2D, p1: Point, p2: Point, symbol: SymbolType, lineWidth: number, color: string) => {
+        if (symbol === 'none' || !p1 || !p2) return;
+        const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+        ctx.save();
+        ctx.fillStyle = color;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = lineWidth;
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
-        ctx.setLineDash({ solid: [], dashed: [15, 10], dotted: [2, 8] }[obj.lineDash]);
+        ctx.setLineDash([]); // Symbols should always be solid
+
+        if (symbol === 'arrow') {
+            const arrowLength = lineWidth * 3;
+            const arrowAngle = Math.PI / 6;
+            ctx.beginPath();
+            ctx.moveTo(p2.x, p2.y);
+            ctx.lineTo(p2.x - arrowLength * Math.cos(angle - arrowAngle), p2.y - arrowLength * Math.sin(angle - arrowAngle));
+            ctx.moveTo(p2.x, p2.y);
+            ctx.lineTo(p2.x - arrowLength * Math.cos(angle + arrowAngle), p2.y - arrowLength * Math.sin(angle + arrowAngle));
+            ctx.stroke();
+        } else if (symbol === 'circle') {
+            ctx.beginPath();
+            ctx.arc(p2.x, p2.y, lineWidth * 1.5, 0, 2 * Math.PI);
+            ctx.fill();
+        }
+        ctx.restore();
+    };
+
+    const drawObject = useCallback((ctx: CanvasRenderingContext2D, obj: Drawable) => {
+        ctx.save();
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
         
         ctx.beginPath();
         if ((obj.type === 'pen' || obj.type === 'line') && obj.points.length > 1) {
@@ -557,15 +646,50 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ baseImage, onSave, onCanc
             const [start, end] = obj.points;
             ctx.rect(start.x, start.y, end.x - start.x, end.y - start.y);
         }
+        
+        if (isShapeTool(obj.type) && obj.closed) {
+             ctx.closePath();
+        }
+
+        // Fill logic (must come before stroke)
+        if (isShapeTool(obj.type) && obj.closed && obj.fillColor && (obj.fillOpacity ?? 0) > 0) {
+            const hex = obj.fillColor.replace('#', '');
+            const r = parseInt(hex.substring(0, 2), 16);
+            const g = parseInt(hex.substring(2, 4), 16);
+            const b = parseInt(hex.substring(4, 6), 16);
+            ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${obj.fillOpacity})`;
+            ctx.fill();
+        }
+        
+        // Stroke logic
+        ctx.strokeStyle = obj.color;
+        ctx.lineWidth = obj.lineWidth;
+        ctx.setLineDash({ solid: [], dashed: [15, 10], dotted: [2, 8] }[obj.lineDash]);
         ctx.stroke();
 
+        ctx.restore(); // Restore before drawing symbols to not affect them
+
+        // Draw line end symbols
+        if (isLineTool(obj.type) && obj.points.length > 1) {
+            if (obj.startSymbol) {
+                drawSymbol(ctx, obj.points[1], obj.points[0], obj.startSymbol, obj.lineWidth, obj.color);
+            }
+            if (obj.endSymbol) {
+                 const lastIndex = obj.points.length - 1;
+                 drawSymbol(ctx, obj.points[lastIndex - 1], obj.points[lastIndex], obj.endSymbol, obj.lineWidth, obj.color);
+            }
+        }
+        
+        // Text logic
         if (obj.type === 'text' && obj.text && obj.points.length > 0) {
+            ctx.save();
             ctx.fillStyle = obj.color;
             ctx.font = `${obj.lineWidth * 4}px sans-serif`;
             ctx.textBaseline = 'top';
             obj.text.split('\n').forEach((line, i) => {
                  ctx.fillText(line, obj.points[0].x, obj.points[0].y + i * (obj.lineWidth * 4 * 1.2));
             });
+            ctx.restore();
         }
     }, []);
 
@@ -596,11 +720,13 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ baseImage, onSave, onCanc
                     maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
                 });
             }
+            ctx.save();
             ctx.strokeStyle = '#4f46e5';
             ctx.lineWidth = 1;
             ctx.setLineDash([6, 3]);
             const padding = 5 + selectedObject.lineWidth / 2;
             ctx.strokeRect(minX - padding, minY - padding, maxX - minX + padding * 2, maxY - minY + padding * 2);
+            ctx.restore();
         }
     }, [getContext, objects, drawingObject, drawObject, selectedObjectId]);
 
@@ -626,22 +752,75 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ baseImage, onSave, onCanc
     }, [editingText]);
 
     useEffect(() => {
-        const selectedObject = objects.find(obj => obj.id === selectedObjectId);
-        if (!selectedObject) return;
-        const updatedObjects = objects.map(obj => 
-            obj.id === selectedObjectId ? { ...obj, color, lineWidth, lineDash } : obj
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Shift') isShiftPressedRef.current = true;
+        };
+        const handleKeyUp = (e: KeyboardEvent) => {
+            if (e.key === 'Shift') isShiftPressedRef.current = false;
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        window.addEventListener('keyup', handleKeyUp);
+        return () => {
+            window.removeEventListener('keydown', handleKeyDown);
+            window.removeEventListener('keyup', handleKeyUp);
+        };
+    }, []);
+
+    // Update selected object properties when toolbar controls change
+    const updateSelectedObjectProperties = () => {
+        if (!selectedObjectId) return;
+        setObjects(prevObjects =>
+            prevObjects.map(obj => {
+                if (obj.id !== selectedObjectId) return obj;
+
+                const updatedObject: Drawable = {
+                    ...obj,
+                    color,
+                    lineWidth,
+                    lineDash,
+                };
+
+                if (isShapeTool(obj.type)) {
+                    updatedObject.fillColor = fillColor;
+                    updatedObject.fillOpacity = fillOpacity;
+                    updatedObject.closed = isClosed;
+                }
+                if (isLineTool(obj.type)) {
+                    updatedObject.startSymbol = startSymbol;
+                    updatedObject.endSymbol = endSymbol;
+                }
+                return updatedObject;
+            })
         );
-        if (JSON.stringify(objects) !== JSON.stringify(updatedObjects)) {
-            setObjects(updatedObjects);
-        }
-    }, [color, lineWidth, lineDash, selectedObjectId]);
-    
+    };
+
+    const handlePropertyChangeWithHistory = (updateFn: () => void) => {
+        updateFn();
+        // Use a timeout to batch updates and push to history after state has settled
+        setTimeout(() => {
+            setObjects(currentObjects => {
+                updateHistory(currentObjects);
+                return currentObjects;
+            });
+        }, 0);
+    };
+
+    // Update toolbar controls when selection changes
     useEffect(() => {
         const selectedObject = objects.find(obj => obj.id === selectedObjectId);
         if (selectedObject) {
             setColor(selectedObject.color);
             setLineWidth(selectedObject.lineWidth);
             setLineDash(selectedObject.lineDash);
+             if (isShapeTool(selectedObject.type)) {
+                setFillColor(selectedObject.fillColor || '#4f46e5');
+                setFillOpacity(selectedObject.fillOpacity || 0.3);
+                setIsClosed(selectedObject.closed || false);
+            }
+             if (isLineTool(selectedObject.type)) {
+                setStartSymbol(selectedObject.startSymbol || 'none');
+                setEndSymbol(selectedObject.endSymbol || 'none');
+            }
         }
     }, [selectedObjectId, objects]);
 
@@ -649,42 +828,79 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ baseImage, onSave, onCanc
     const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
         if (editingText) return;
         const pos = getMousePos(e);
-        setStartPoint(pos);
-
+        
         if (tool === 'select') {
             const target = getObjectAtPosition(pos);
             setSelectedObjectId(target?.id || null);
             if (target) {
                 setAction('moving');
+                setStartPoint(pos);
                 setInitialObjectState(JSON.parse(JSON.stringify(target)));
             }
-        } else {
+        } else if (tool === 'pen') {
             setAction('drawing');
             setSelectedObjectId(null);
-            const newObject: Drawable = {
-                id: `obj-${Date.now()}`, type: tool, points: [pos],
+            if (drawingObject) { // Continue drawing existing polyline
+                let newPos = pos;
+                if(isShiftPressedRef.current) {
+                    const lastPoint = drawingObject.points[drawingObject.points.length - 1];
+                    const dx = Math.abs(pos.x - lastPoint.x);
+                    const dy = Math.abs(pos.y - lastPoint.y);
+                    const angle = Math.atan2(pos.y - lastPoint.y, pos.x - lastPoint.x) * 180 / Math.PI;
+                    const snapAngle = 45;
+                    const snappedAngle = Math.round(angle / snapAngle) * snapAngle;
+
+                    if (dx > dy) { //倾向于水平
+                        if(Math.abs(snappedAngle) === 180 || snappedAngle === 0) newPos.y = lastPoint.y;
+                        else if (snappedAngle === 45 || snappedAngle === -135) newPos.y = lastPoint.y + (pos.x - lastPoint.x);
+                        else if(snappedAngle === -45 || snappedAngle === 135) newPos.y = lastPoint.y - (pos.x - lastPoint.x);
+                    } else { //倾向于垂直
+                        if(Math.abs(snappedAngle) === 90) newPos.x = lastPoint.x;
+                        else if (snappedAngle === 45 || snappedAngle === -135) newPos.x = lastPoint.x + (pos.y - lastPoint.y);
+                        else if(snappedAngle === -45 || snappedAngle === 135) newPos.x = lastPoint.x - (pos.y - lastPoint.y);
+                    }
+                }
+                setDrawingObject(d => d ? ({ ...d, points: [...d.points, newPos] }) : null);
+            } else { // Start new polyline
+                const newObject: Drawable = {
+                    id: `obj-${Date.now()}`, type: tool, points: [pos],
+                    color, lineWidth, lineDash,
+                    closed: isClosed,
+                    fillColor, fillOpacity,
+                    startSymbol, endSymbol,
+                };
+                setDrawingObject(newObject);
+            }
+        } else {
+             setAction('drawing');
+             setSelectedObjectId(null);
+             setStartPoint(pos);
+             const newObject: Drawable = {
+                id: `obj-${Date.now()}`, type: tool, points: [pos, pos],
                 color, lineWidth, lineDash,
-                text: tool === 'text' ? 'Text' : undefined
+                closed: tool === 'rectangle' ? true : undefined,
+                fillColor: tool === 'rectangle' ? fillColor : undefined,
+                fillOpacity: tool === 'rectangle' ? fillOpacity : undefined,
+                startSymbol: tool === 'line' ? startSymbol : undefined,
+                endSymbol: tool === 'line' ? endSymbol : undefined,
             };
-            if (tool === 'line' || tool === 'rectangle') newObject.points.push(pos);
             setDrawingObject(newObject);
         }
     };
     
     const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-        if (action === 'none') return;
-        const pos = getMousePos(e);
-        
-        if (action === 'drawing' && drawingObject) {
+        let pos = getMousePos(e);
+
+        if (action === 'drawing' && drawingObject && tool !== 'pen') {
             setDrawingObject(current => {
                 if (!current) return null;
                 const newPoints = [...current.points];
-                if (current.type === 'pen') newPoints.push(pos);
-                else if (current.type === 'line' || current.type === 'rectangle') newPoints[1] = pos;
+                newPoints[1] = pos;
                 return { ...current, points: newPoints };
             });
         } else if (action === 'moving' && selectedObjectId && initialObjectState) {
-            const dx = pos.x - startPoint.x, dy = pos.y - startPoint.y;
+            const dx = pos.x - startPoint.x;
+            const dy = pos.y - startPoint.y;
             const newObjects = objects.map(obj => 
                 obj.id === selectedObjectId 
                     ? { ...obj, points: initialObjectState.points.map(p => ({ x: p.x + dx, y: p.y + dy })) }
@@ -694,45 +910,58 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ baseImage, onSave, onCanc
         }
     };
 
-    const handleMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
-        const pos = getMousePos(e);
-        if (action === 'drawing' && drawingObject) {
-            if (tool === 'text') {
-                setEditingText({ id: drawingObject.id, text: '', ...pos, width: 150, height: lineWidth * 4 * 1.2 + 8 });
-            } else {
+    const handleMouseUp = () => {
+        if (action === 'drawing' && drawingObject && tool !== 'pen') {
+             if (tool === 'text') {
+                 setEditingText({
+                    id: drawingObject.id, text: '',
+                    x: drawingObject.points[0].x, y: drawingObject.points[0].y,
+                    width: 150, height: lineWidth * 4 * 1.2 + 8
+                });
+             } else if (drawingObject.points.length > 1 && (drawingObject.points[0].x !== drawingObject.points[1].x || drawingObject.points[0].y !== drawingObject.points[1].y)) {
                 const newObjects = [...objects, drawingObject];
                 setObjects(newObjects);
                 updateHistory(newObjects);
             }
+            setDrawingObject(null);
         } else if (action === 'moving') {
             updateHistory(objects);
         }
         setAction('none');
-        setDrawingObject(null);
         setInitialObjectState(null);
     };
 
     const handleDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-        if (tool !== 'select') return;
-        const pos = getMousePos(e);
-        const target = getObjectAtPosition(pos);
-        if (target?.type === 'text') {
-            setSelectedObjectId(target.id);
-            const ctx = getContext();
-            if (!ctx) return;
-            ctx.font = `${target.lineWidth * 4}px sans-serif`;
-            const lines = target.text?.split('\n') || [''];
-            const w = Math.max(...lines.map(l => ctx.measureText(l).width)) + 20;
-            const h = lines.length * target.lineWidth * 4 * 1.2 + 8;
-            setEditingText({ id: target.id, text: target.text || '', x: target.points[0].x, y: target.points[0].y, width: w, height: h });
+        if (tool === 'pen' && drawingObject && drawingObject.points.length > 1) {
+            const finalObject = { ...drawingObject };
+            const newObjects = [...objects, finalObject];
+            setObjects(newObjects);
+            updateHistory(newObjects);
+            setDrawingObject(null);
+            setAction('none');
+        } else if (tool === 'select') {
+            const pos = getMousePos(e);
+            const target = getObjectAtPosition(pos);
+            if (target?.type === 'text') {
+                setSelectedObjectId(target.id);
+                const ctx = getContext();
+                if (!ctx) return;
+                ctx.font = `${target.lineWidth * 4}px sans-serif`;
+                const lines = target.text?.split('\n') || [''];
+                const w = Math.max(...lines.map(l => ctx.measureText(l).width)) + 20;
+                const h = lines.length * target.lineWidth * 4 * 1.2 + 8;
+                setEditingText({ id: target.id, text: target.text || '', x: target.points[0].x, y: target.points[0].y, width: w, height: h });
+            }
         }
     };
 
     const handleTextBlur = () => {
         if (!editingText) return;
         const existingObj = objects.find(o => o.id === editingText.id);
-        if (editingText.text.trim() === '') {
-            if (existingObj) { // It was an existing object being edited to be empty
+        const textContent = editingText.text.trim();
+
+        if (textContent === '') {
+            if (existingObj) { 
                 const newObjects = objects.filter(o => o.id !== editingText.id);
                 setObjects(newObjects);
                 updateHistory(newObjects);
@@ -740,10 +969,10 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ baseImage, onSave, onCanc
         } else {
             const newTextObject: Drawable = {
                 id: editingText.id, type: 'text', points: [{ x: editingText.x, y: editingText.y }],
-                color, lineWidth, lineDash: 'solid', text: editingText.text,
+                color, lineWidth, lineDash: 'solid', text: textContent,
             };
             const newObjects = existingObj
-                ? objects.map(o => o.id === editingText.id ? newTextObject : o)
+                ? objects.map(o => o.id === editingText.id ? {...newTextObject, color: o.color, lineWidth: o.lineWidth} : o)
                 : [...objects, newTextObject];
             setObjects(newObjects);
             updateHistory(newObjects);
@@ -778,6 +1007,7 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ baseImage, onSave, onCanc
     const handleSave = () => {
         setSelectedObjectId(null); 
         setTimeout(() => {
+            redrawCanvas(); // ensure canvas is drawn without selection box
             if (canvasRef.current) {
                 onSave(canvasRef.current.toDataURL('image/png'));
             }
@@ -786,7 +1016,7 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ baseImage, onSave, onCanc
 
     const tools: { id: Tool; icon: React.ReactNode; name: string }[] = [
         { id: 'select', icon: <SelectIcon className="w-5 h-5" />, name: 'Select & Move' },
-        { id: 'pen', icon: <PenIcon className="w-5 h-5" />, name: 'Pen' },
+        { id: 'pen', icon: <PenIcon className="w-5 h-5" />, name: 'Pen (Polyline)' },
         { id: 'line', icon: <LineIcon className="w-5 h-5" />, name: 'Line' },
         { id: 'rectangle', icon: <RectangleIcon className="w-5 h-5" />, name: 'Rectangle' },
         { id: 'text', icon: <TextIcon className="w-5 h-5" />, name: 'Text' },
@@ -796,10 +1026,19 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ baseImage, onSave, onCanc
         { id: 'dashed', name: 'Dashed', icon: <svg width="100%" height="2"><line x1="0" y1="1" x2="100%" y2="1" stroke="currentColor" strokeWidth="2" strokeDasharray="6,4"></line></svg> },
         { id: 'dotted', name: 'Dotted', icon: <svg width="100%" height="2"><line x1="0" y1="1" x2="100%" y2="1" stroke="currentColor" strokeWidth="2" strokeDasharray="1,4" strokeLinecap="round"></line></svg> },
     ];
+    const symbolTypes: { id: SymbolType, name: string }[] = [
+        { id: 'none', name: 'None' },
+        { id: 'arrow', name: 'Arrow' },
+        { id: 'circle', name: 'Circle' },
+    ];
+    
+    const selectedObject = objects.find(o => o.id === selectedObjectId);
+    const showFillControls = tool === 'pen' || tool === 'rectangle' || (selectedObject && isShapeTool(selectedObject.type));
+    const showLineEndControls = tool === 'line' || tool === 'pen' || (selectedObject && isLineTool(selectedObject.type));
 
     return (
         <div className="fixed inset-0 bg-black/80 flex flex-col justify-center items-center z-50 p-4">
-            <div className="bg-slate-800 rounded-lg p-4 flex flex-col gap-4 w-full max-w-7xl h-full max-h-[95vh]">
+            <div className="bg-slate-800 rounded-lg p-2 flex flex-col gap-2 w-full max-w-full h-full max-h-[98vh]">
                 <div className="flex-shrink-0 flex flex-wrap items-center justify-between gap-y-2 gap-x-4 bg-slate-900/50 p-2 rounded-lg">
                     <div className="flex items-center gap-1 bg-slate-700 p-1 rounded-lg">
                         {tools.map(({ id, icon, name }) => (
@@ -808,28 +1047,79 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ baseImage, onSave, onCanc
                             </button>
                         ))}
                     </div>
-                     <div className="flex items-center gap-4">
-                        <input id="color-picker" type="color" value={color} onChange={(e) => setColor(e.target.value)} className="w-8 h-8 p-0 border-none rounded bg-slate-700 cursor-pointer" title="Color"/>
-                        <div className="flex items-center gap-2">
-                            <input id="line-width" type="range" min="1" max="50" value={lineWidth} onChange={(e) => setLineWidth(Number(e.target.value))} className="w-24 cursor-pointer" title="Line Width"/>
-                            <span className="text-sm text-slate-300 w-6 text-center">{lineWidth}</span>
+                     <div className="flex items-center flex-wrap gap-x-4 gap-y-2">
+                        {/* Stroke Properties */}
+                        <div className="flex items-end gap-3">
+                            <label htmlFor="color-picker" className="flex flex-col items-center">
+                                <span className="text-xs text-slate-400 mb-1">Stroke</span>
+                                <input id="color-picker" type="color" value={color} onChange={(e) => { setColor(e.target.value); if (selectedObjectId) handlePropertyChangeWithHistory(() => updateSelectedObjectProperties()); }} className="w-8 h-8 p-0 border-none rounded bg-slate-700 cursor-pointer" title="Stroke Color"/>
+                            </label>
+                            <div className="flex flex-col">
+                                <label htmlFor="line-width" className="text-xs text-slate-400 mb-1">Width</label>
+                                <div className="flex items-center gap-2">
+                                    <input id="line-width" type="range" min="1" max="50" value={lineWidth} onChange={(e) => { setLineWidth(Number(e.target.value)); if (selectedObjectId) handlePropertyChangeWithHistory(() => updateSelectedObjectProperties()); }} className="w-20 md:w-24 cursor-pointer" title="Line Width"/>
+                                    <span className="text-sm text-slate-300 w-6 text-center">{lineWidth}</span>
+                                </div>
+                            </div>
+                            <div className="flex flex-col">
+                                <span className="text-xs text-slate-400 mb-1">Style</span>
+                                <div className="flex items-center gap-1 bg-slate-700 p-1 rounded-lg">
+                                    {lineStyles.map(({ id, icon, name }) => (
+                                        <button key={id} onClick={() => { setLineDash(id); if (selectedObjectId) handlePropertyChangeWithHistory(() => updateSelectedObjectProperties()); }} title={name} className={`p-2 w-10 h-8 flex items-center justify-center rounded-md transition-colors ${lineDash === id ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-600'}`}>
+                                            {icon}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
                         </div>
-                         <div className="flex items-center gap-1 bg-slate-700 p-1 rounded-lg">
-                             {lineStyles.map(({ id, icon, name }) => (
-                                <button key={id} onClick={() => setLineDash(id)} title={name} className={`p-2 w-10 h-8 flex items-center justify-center rounded-md transition-colors ${lineDash === id ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-600'}`}>
-                                    {icon}
-                                </button>
-                            ))}
+
+                        {/* Line Ends Properties */}
+                        <div className={`flex items-end gap-3 border-l border-slate-700 pl-3 transition-opacity ${showLineEndControls ? 'opacity-100' : 'opacity-30 pointer-events-none'}`}>
+                           <div className="flex flex-col">
+                                <label htmlFor="start-symbol" className="text-xs text-slate-400 mb-1">Start</label>
+                                <select id="start-symbol" value={startSymbol} onChange={(e) => { setStartSymbol(e.target.value as SymbolType); if (selectedObjectId) handlePropertyChangeWithHistory(() => updateSelectedObjectProperties()); }} className="bg-slate-700 border border-slate-600 rounded-md py-1 px-2 text-xs text-slate-200 focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition-all h-8">
+                                    {symbolTypes.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                </select>
+                            </div>
+                            <div className="flex flex-col">
+                                <label htmlFor="end-symbol" className="text-xs text-slate-400 mb-1">End</label>
+                                <select id="end-symbol" value={endSymbol} onChange={(e) => { setEndSymbol(e.target.value as SymbolType); if (selectedObjectId) handlePropertyChangeWithHistory(() => updateSelectedObjectProperties()); }} className="bg-slate-700 border border-slate-600 rounded-md py-1 px-2 text-xs text-slate-200 focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition-all h-8">
+                                    {symbolTypes.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                </select>
+                            </div>
+                        </div>
+
+                        {/* Fill Properties */}
+                        <div className={`flex items-end gap-3 border-l border-slate-700 pl-3 transition-opacity ${showFillControls ? 'opacity-100' : 'opacity-30 pointer-events-none'}`}>
+                           <label htmlFor="fill-color-picker" className="flex flex-col items-center">
+                                <span className="text-xs text-slate-400 mb-1">Fill</span>
+                                <input id="fill-color-picker" type="color" value={fillColor} onChange={(e) => { setFillColor(e.target.value); if (selectedObjectId) handlePropertyChangeWithHistory(() => updateSelectedObjectProperties()); }} className="w-8 h-8 p-0 border-none rounded bg-slate-700 cursor-pointer" title="Fill Color"/>
+                            </label>
+                             <div className="flex flex-col">
+                                <label htmlFor="fill-opacity" className="text-xs text-slate-400 mb-1">Opacity</label>
+                                <div className="flex items-center gap-2">
+                                    <input id="fill-opacity" type="range" min="0" max="1" step="0.05" value={fillOpacity} onChange={(e) => { setFillOpacity(Number(e.target.value)); if (selectedObjectId) handlePropertyChangeWithHistory(() => updateSelectedObjectProperties()); }} className="w-20 md:w-24 cursor-pointer" title="Fill Opacity"/>
+                                    <span className="text-sm text-slate-300 w-10 text-center">{Math.round(fillOpacity * 100)}%</span>
+                                </div>
+                            </div>
+                            <div className="flex flex-col justify-end h-full">
+                                <div className="flex items-center gap-2 mb-1">
+                                    <input type="checkbox" id="close-path" checked={isClosed} onChange={(e) => { setIsClosed(e.target.checked); if (selectedObjectId) handlePropertyChangeWithHistory(() => updateSelectedObjectProperties()); }} className="w-4 h-4 rounded bg-slate-600 border-slate-500 text-indigo-500 focus:ring-indigo-600 cursor-pointer" />
+                                    <label htmlFor="close-path" className="text-sm text-slate-300 cursor-pointer">Close Path</label>
+                                </div>
+                            </div>
                         </div>
                     </div>
-                    <div className="flex items-center gap-1 bg-slate-700 p-1 rounded-lg">
-                         <button onClick={handleUndo} disabled={historyIndex === 0} title="Undo (Ctrl+Z)" className="p-2 rounded-md transition-colors text-slate-300 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed"><UndoIcon className="w-5 h-5"/></button>
-                         <button onClick={handleRedo} disabled={historyIndex === history.length - 1} title="Redo (Ctrl+Y)" className="p-2 rounded-md transition-colors text-slate-300 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed"><RedoIcon className="w-5 h-5"/></button>
-                         <button onClick={handleDelete} disabled={!selectedObjectId} title="Delete" className="p-2 rounded-md transition-colors text-red-400 hover:bg-red-500 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"><TrashIcon className="w-5 h-5"/></button>
-                    </div>
-                    <div className="flex gap-2">
-                        <button onClick={onCancel} className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-2 px-4 rounded-lg transition-colors">Cancel</button>
-                        <button onClick={handleSave} className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-2 px-4 rounded-lg transition-colors">Save</button>
+                    <div className="flex items-center gap-1">
+                        <div className="flex items-center gap-1 bg-slate-700 p-1 rounded-lg">
+                             <button onClick={handleUndo} disabled={historyIndex === 0} title="Undo (Ctrl+Z)" className="p-2 rounded-md transition-colors text-slate-300 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed"><UndoIcon className="w-5 h-5"/></button>
+                             <button onClick={handleRedo} disabled={historyIndex === history.length - 1} title="Redo (Ctrl+Y)" className="p-2 rounded-md transition-colors text-slate-300 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed"><RedoIcon className="w-5 h-5"/></button>
+                             <button onClick={handleDelete} disabled={!selectedObjectId} title="Delete" className="p-2 rounded-md transition-colors text-red-400 hover:bg-red-500 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"><TrashIcon className="w-5 h-5"/></button>
+                        </div>
+                        <div className="flex gap-2 ml-2">
+                            <button onClick={onCancel} className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-2 px-4 rounded-lg transition-colors">Cancel</button>
+                            <button onClick={handleSave} className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-2 px-4 rounded-lg transition-colors">Save</button>
+                        </div>
                     </div>
                 </div>
                 <div className="relative flex-grow w-full h-full flex justify-center items-center overflow-hidden bg-slate-900/50 rounded-md">
@@ -838,6 +1128,7 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ baseImage, onSave, onCanc
                         onMouseDown={handleMouseDown}
                         onMouseMove={handleMouseMove}
                         onMouseUp={handleMouseUp}
+                        onMouseLeave={handleMouseUp}
                         onDoubleClick={handleDoubleClick}
                         className={tool === 'select' ? 'cursor-default' : 'cursor-crosshair'}
                     />
@@ -859,7 +1150,7 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ baseImage, onSave, onCanc
                                 outline: 'none',
                                 resize: 'none',
                                 overflow: 'hidden',
-                                fontSize: `${lineWidth * 4}px`,
+                                fontSize: `${(objects.find(o => o.id === editingText.id)?.lineWidth || lineWidth) * 4}px`,
                                 fontFamily: 'sans-serif',
                                 lineHeight: 1.2,
                                 padding: '2px',
@@ -1074,6 +1365,7 @@ export default function App() {
 
   const [editingTarget, setEditingTarget] = useState<'base' | 'checkback' | null>(null);
   const [isCropping, setIsCropping] = useState<boolean>(false);
+  const [isEnhancementMode, setIsEnhancementMode] = useState<boolean>(false);
 
 
   const handleImageChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -1116,7 +1408,7 @@ export default function App() {
     
     try {
       const materialData = materials.map(({ file, name }) => ({ file, name }));
-      const result = await renderImage(imageFile, materialData, prompt);
+      const result = await renderImage(imageFile, materialData, prompt, isEnhancementMode);
       setGeneratedImage(result);
     } catch (e) {
       if (e instanceof Error) setError(e.message);
@@ -1124,7 +1416,7 @@ export default function App() {
     } finally {
       setIsLoading(false);
     }
-  }, [imageFile, materials, prompt]);
+  }, [imageFile, materials, prompt, isEnhancementMode]);
   
   const handleReRender = useCallback(async () => {
     if (!generatedImage || !reRenderPrompt) {
@@ -1242,6 +1534,8 @@ export default function App() {
                 onRender={handleRender}
                 isLoading={isLoading}
                 onStartEdit={() => setEditingTarget('base')}
+                isEnhancementMode={isEnhancementMode}
+                onEnhancementModeChange={setIsEnhancementMode}
               />
           </div>
           <div className="w-full">
